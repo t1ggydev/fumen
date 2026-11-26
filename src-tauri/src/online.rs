@@ -40,12 +40,16 @@ pub fn set(on: bool) {
 }
 
 pub fn is_on() -> bool {
-    // the tests talk to their own local servers
-    cfg!(test) || ON.load(Ordering::SeqCst)
+    // the tests talk to their own local servers; a developer's own osu! app runs online without the site
+    cfg!(test) || ON.load(Ordering::SeqCst) || crate::osu_auth::dev_app_configured()
 }
 
 /// Ok while the online features are on and not blocked; else what to tell the player.
 pub fn ensure() -> Result<()> {
+    // a developer's own osu! app goes straight to osu! and the mirrors, not the site — no block check
+    if crate::osu_auth::dev_app_configured() {
+        return Ok(());
+    }
     if !is_on() {
         return Err(Error::known("online-off", "This needs Fumen's online features, and they're off. You can turn them on in Settings › About."));
     }

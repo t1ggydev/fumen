@@ -43,6 +43,40 @@ impl Default for Endpoints {
     }
 }
 
+/// A developer's own osu! OAuth app, from the environment, so an unsigned build can be tested
+/// without the site: FUMEN_OSU_CLIENT_ID and FUMEN_OSU_CLIENT_SECRET (register the app at
+/// osu.ppy.sh/home/account/edit#new-oauth-application), with an optional FUMEN_OSU_REDIRECT whose
+/// path is /callback (default http://localhost:6749/callback — register exactly that). When set,
+/// the login and token refresh go straight to osu!, not through fumen.dertesti.dev.
+struct DevApp {
+    client_id: String,
+    client_secret: String,
+    redirect: String,
+    port: u16,
+}
+
+fn env(name: &str) -> Option<String> {
+    std::env::var(name).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+}
+
+fn dev_app() -> Option<DevApp> {
+    parse_dev_app(env("FUMEN_OSU_CLIENT_ID"), env("FUMEN_OSU_CLIENT_SECRET"), env("FUMEN_OSU_REDIRECT"))
+}
+
+/// The dev app from its three (optional) env values: both credentials are needed; the redirect
+/// defaults, and its port is what the listener binds and osu! redirects to.
+fn parse_dev_app(client_id: Option<String>, client_secret: Option<String>, redirect: Option<String>) -> Option<DevApp> {
+    let redirect = redirect.unwrap_or_else(|| "http://localhost:6749/callback".into());
+    let port = redirect.rsplit(':').next().and_then(|tail| tail.split('/').next()).and_then(|p| p.parse().ok())?;
+    Some(DevApp { client_id: client_id?, client_secret: client_secret?, redirect, port })
+}
+
+/// Whether a developer's own osu! app is set in the environment (online.rs opens the online features
+/// without the site when so).
+pub fn dev_app_configured() -> bool {
+    dev_app().is_some()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Account {
@@ -101,11 +135,16 @@ pub fn account(data_dir: &Path) -> Option<Account> {
 /// Logs in through the browser: `open` gets osu!'s login page to show. Waits until the browser
 /// comes back, `cancel` is set or five minutes have passed.
 pub fn login(data_dir: &Path, ep: &Endpoints, cancel: &AtomicBool, open: impl FnOnce(&str) -> Result<()>) -> Result<Account> {
-    let listener = TcpListener::bind(("127.0.0.1", 0))?;
+    let dev = dev_app();
+    // a dev app's redirect names a fixed port (osu! matches it exactly); the site flow takes any
+    let listener = match &dev {
+        Some(d) => TcpListener::bind(("127.0.0.1", d.port)).map_err(|e| Error::known("login-failed", format!("Couldn't open the dev login port {} (FUMEN_OSU_REDIRECT): {e}", d.port)))?,
+        None => TcpListener::bind(("127.0.0.1", 0))?,
+    };
     let state = format!("{}-{}", listener.local_addr()?.port(), nonce()?);
-    open(&authorize_url(ep, &state))?;
+    open(&authorize_url(ep, &dev, &state))?;
     let (mut browser, code) = wait_for_code(&listener, &state, cancel)?;
-    let result = token_request(ep, "token", &serde_json::json!({ "code": code })).and_then(|tokens| {
+    let result = code_to_tokens(ep, &dev, &code).and_then(|tokens| {
         let account = fetch_account(ep, &tokens.access)?;
         write(data_dir, &Stored { tokens, account: account.clone() })?;
         Ok(account)
@@ -119,12 +158,17 @@ pub fn login(data_dir: &Path, ep: &Endpoints, cancel: &AtomicBool, open: impl Fn
     result
 }
 
-/// osu!'s login page for this attempt.
-fn authorize_url(ep: &Endpoints, state: &str) -> String {
+/// osu!'s login page for this attempt. A dev app sends osu! straight back to our local listener;
+/// the site flow goes via fumen.dertesti.dev/oauth/callback.
+fn authorize_url(ep: &Endpoints, dev: &Option<DevApp>, state: &str) -> String {
+    let (client_id, redirect) = match dev {
+        Some(d) => (d.client_id.clone(), d.redirect.clone()),
+        None => (CLIENT_ID.to_string(), format!("{}/oauth/callback", ep.site)),
+    };
     format!(
-        "{}/oauth/authorize?client_id={CLIENT_ID}&redirect_uri={}&response_type=code&scope={}&state={}",
+        "{}/oauth/authorize?client_id={client_id}&redirect_uri={}&response_type=code&scope={}&state={}",
         ep.osu,
-        enc(&format!("{}/oauth/callback", ep.site)),
+        enc(&redirect),
         enc(SCOPES),
         enc(state)
     )
@@ -315,6 +359,48 @@ fn token_request(ep: &Endpoints, kind: &str, body: &serde_json::Value) -> Result
     Ok(Tokens { access, refresh, expires_at: crate::lazer::now_ms() + expires_in * 1000 })
 }
 
+/// Trades a code (or refresh token) for tokens: straight at osu! with a dev app, else via the site.
+fn code_to_tokens(ep: &Endpoints, dev: &Option<DevApp>, code: &str) -> Result<Tokens> {
+    match dev {
+        Some(d) => osu_token(ep, &[("client_id", &d.client_id), ("client_secret", &d.client_secret), ("code", code), ("grant_type", "authorization_code"), ("redirect_uri", &d.redirect)]),
+        None => token_request(ep, "token", &serde_json::json!({ "code": code })),
+    }
+}
+
+fn refresh_tokens(ep: &Endpoints, dev: &Option<DevApp>, refresh: &str) -> Result<Tokens> {
+    match dev {
+        Some(d) => osu_token(ep, &[("client_id", &d.client_id), ("client_secret", &d.client_secret), ("grant_type", "refresh_token"), ("refresh_token", refresh), ("scope", SCOPES)]),
+        None => token_request(ep, "refresh", &serde_json::json!({ "refresh_token": refresh })),
+    }
+}
+
+/// osu!'s own /oauth/token (authorization-code or refresh grant) for a developer's app, form-encoded
+/// as osu! expects. No fumen.dertesti.dev, no build signature.
+fn osu_token(ep: &Endpoints, form: &[(&str, &str)]) -> Result<Tokens> {
+    crate::online::ensure()?;
+    let body = form.iter().map(|(k, v)| format!("{}={}", enc(k), enc(v))).collect::<Vec<_>>().join("&");
+    let mut res = agent()
+        .post(&format!("{}/oauth/token", ep.osu))
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .send(body)
+        .map_err(|e| unreachable("login-failed", "osu!", &ep.osu, &e))?;
+    let status = res.status().as_u16();
+    let data: serde_json::Value = res.body_mut().read_to_string().ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
+    let text = |k: &str| data.get(k).and_then(|v| v.as_str()).map(str::to_string);
+    if status != 200 {
+        let message = text("message").or_else(|| text("error_description")).or_else(|| text("error")).unwrap_or_else(|| format!("osu! said {status} to the token request. Check the dev app's client id, secret and redirect."));
+        return Err(match status {
+            400 | 401 => Error::known("osu-logged-out", message),
+            _ => Error::known("login-failed", message),
+        });
+    }
+    let (Some(access), Some(refresh)) = (text("access_token"), text("refresh_token")) else {
+        return Err(Error::known("login-failed", "osu! sent no tokens."));
+    };
+    let expires_in = data.get("expires_in").and_then(|v| v.as_i64()).unwrap_or(3600);
+    Ok(Tokens { access, refresh, expires_at: crate::lazer::now_ms() + expires_in * 1000 })
+}
+
 #[derive(Deserialize)]
 struct MeStats {
     global_rank: Option<u64>,
@@ -400,7 +486,7 @@ pub fn access_token(data_dir: &Path, ep: &Endpoints) -> Result<String> {
     if stored.tokens.expires_at - crate::lazer::now_ms() > RENEW_BEFORE_MS {
         return Ok(stored.tokens.access);
     }
-    match token_request(ep, "refresh", &serde_json::json!({ "refresh_token": stored.tokens.refresh })) {
+    match refresh_tokens(ep, &dev_app(), &stored.tokens.refresh) {
         Ok(tokens) => {
             stored.tokens = tokens;
             write(data_dir, &stored)?;
@@ -605,6 +691,24 @@ mod tests {
         let ep = Endpoints { site: "https://no-such-host.invalid".into(), osu: "https://no-such-host.invalid".into() };
         let e = token_request(&ep, "token", &serde_json::json!({ "code": "x" })).unwrap_err();
         assert_eq!(e.to_string(), "Your network couldn't find no-such-host.invalid. Check the internet connection, or try again in a few minutes.");
+    }
+
+    #[test]
+    fn dev_app_from_env_values() {
+        // needs both credentials
+        assert!(parse_dev_app(None, Some("s".into()), None).is_none());
+        assert!(parse_dev_app(Some("1".into()), None, None).is_none());
+        // default redirect and its port
+        let d = parse_dev_app(Some("123".into()), Some("secret".into()), None).unwrap();
+        assert_eq!((d.client_id.as_str(), d.client_secret.as_str(), d.port), ("123", "secret", 6749));
+        assert_eq!(d.redirect, "http://localhost:6749/callback");
+        // a custom redirect: the port is what the listener binds and osu! comes back to
+        let d = parse_dev_app(Some("1".into()), Some("s".into()), Some("http://localhost:7000/callback".into())).unwrap();
+        assert_eq!(d.port, 7000);
+        // the dev app flows straight to osu!, with its own client id
+        assert!(authorize_url(&Endpoints::default(), &Some(d), "9-abc").contains("/oauth/authorize?client_id=1&redirect_uri=http%3A%2F%2Flocalhost%3A7000%2Fcallback"));
+        // no port in the redirect: no dev app
+        assert!(parse_dev_app(Some("1".into()), Some("s".into()), Some("http://localhost/callback".into())).is_none());
     }
 
     #[test]
