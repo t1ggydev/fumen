@@ -6,6 +6,9 @@
   "description": "A beatmap library for osu!",
   "type": "module",
   "scripts": {
+    "calibrate:compare": "node scripts/skill-calibration-search.mjs --compare",
+    "calibrate:search": "node scripts/skill-calibration-search.mjs",
+    "calibrate:preview": "node scripts/skill-calibration.mjs",
     "dev": "vite",
     "dev:browser": "vite --config tools/browser-preview/vite.config.ts",
     "build": "tsc --noEmit && vite build",

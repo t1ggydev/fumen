@@ -29,6 +29,7 @@ mod mma;
 mod mods;
 mod msd;
 mod osu_skills;
+pub mod skill_calibration;
 mod recommend;
 mod wife;
 mod vibro;

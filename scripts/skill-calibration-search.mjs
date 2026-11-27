@@ -1,0 +1,10 @@
+import { spawnSync } from "node:child_process";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
+const python = process.env.PYTHON ?? (process.platform === "win32" ? "python" : "python3");
+const args = process.argv.slice(2);
+const script = args[0] === "--compare" ? (args.shift(), "tools/skill-calibration/rank_curves.py") : "tools/skill-calibration/curve_search.py";
+const result = spawnSync(python, [script, ...args], {cwd: root, stdio: "inherit"});
+if (result.error) throw result.error;
+process.exit(result.status ?? 1);

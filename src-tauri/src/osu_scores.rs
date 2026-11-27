@@ -11,7 +11,7 @@
 use std::collections::HashMap;
 
 use rusqlite::{params, Connection, OptionalExtension};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use crate::db;
@@ -108,7 +108,7 @@ pub fn parse_iso(s: &str) -> Option<i64> {
 // ── osu!'s answers ──────────────────────────────────────────────────────
 
 /// A score as osu! has it.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ApiScore {
     pub id: i64,
     pub beatmap_id: i64,
@@ -130,7 +130,7 @@ pub struct ApiScore {
 }
 
 /// A difficulty as osu! describes it.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ApiBeatmap {
     pub id: i64,
     pub set_id: Option<i64>,

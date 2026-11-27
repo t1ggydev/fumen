@@ -17,7 +17,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use rusqlite::Connection;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::error::{Error, Result};
@@ -51,7 +51,7 @@ pub struct Progress {
 }
 
 /// What osu! has on the player.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Fetched {
     pub user: Value,
     /// osu!mania scores, each once
@@ -61,7 +61,7 @@ pub struct Fetched {
     pub counts: Counts,
 }
 
-#[derive(Debug, Default, Clone, Serialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Counts {
     pub top: usize,

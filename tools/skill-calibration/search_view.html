@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="de">
+<meta charset="utf-8"><meta name="viewport" content="width=device-width">
+<title>Skill-Kurven · Kombinationen vergleichen</title>
+<style>
+body{font:16px/1.55 system-ui;background:#131916;color:#e9ece8;max-width:1350px;margin:28px auto;padding:0 18px}h1,h2{color:#c4eb90}aside{background:#293326;padding:14px;border-radius:10px}input,select,button{font:inherit;background:#202a23;color:inherit;border:1px solid #546354;border-radius:6px;padding:7px}button{cursor:pointer}label{display:inline-flex;align-items:center;gap:8px;margin:5px 12px 5px 0}input[type=number]{width:100px}input[type=search]{width:min(600px,80vw)}select{max-width:100%;width:100%}table{border-collapse:collapse;width:100%;font-variant-numeric:tabular-nums}td,th{padding:9px;text-align:left;border-bottom:1px solid #354039}.scroll{overflow:auto}.error{color:#ffaeae;min-height:1.5em}.muted{color:#aebcb0}section{margin:28px 0}
+</style>
+<h1>Skill-Kurven vergleichen</h1>
+<aside>Nur Sammlung und Vergleich – keine Rangliste, kein automatisch „bester“ Kandidat und keine Änderung aktiver Ratings. Alle Werte sind NoMod-Map-Anforderungen bei perfektem Play.</aside>
+<p id="status">Lade Daten …</p><p class="muted">P50 legt die Zahleneinheit fest. Proportional vergrößerte Zielwerte haben dieselbe normalisierte Kurvenform. Unterschiedliche Zielpunkte beweisen keine unterschiedliche Qualität des Modells.</p>
+<section>
+<h2>Kombination auswählen</h2>
+<div><button id="previous">←</button><label>Nummer <input id="candidate-id" type="number" min="1" value="1"></label><button id="next">→</button><button id="load-id">Nummer laden</button></div>
+<div><label>P50 <input id="p50" type="number" step="any"></label><label>P75 <input id="p75" type="number" step="any"></label><label>P90 <input id="p90" type="number" step="any"></label><button id="load-targets">Zielwerte laden</button> <button id="download">Auswahl als JSON speichern</button></div>
+<p class="error" id="error"></p><p class="muted">Zielwerte müssen im konfigurierten Raster liegen und bereits berechnet sein. Oberhalb P90 läuft die letzte Steigung weiter.</p>
+</section>
+<section>
+<h2>Konkrete Map vergleichen</h2>
+<form id="search"><input id="query" type="search" placeholder="Titel, Artist oder Difficulty, mindestens 2 Zeichen"><button>Suchen</button></form>
+<select id="maps" size="5" aria-label="Suchergebnisse"></select>
+<h3 id="map-title">Noch keine Map gewählt</h3><p id="map-info"></p>
+<div class="scroll"><table><thead><tr><th>Skill</th><th>Rohwert</th><th>Referenz ×5</th><th>Median-Faktor</th><th>Gewählte Kurve</th><th>Referenz geeignet?</th></tr></thead><tbody id="map-values"></tbody></table></div>
+</section>
+<section>
+<h2>Trainingsverteilung mit dieser Kombination</h2>
+<p class="muted">Gleich gewichtete Schwierigkeits-/Pattern-Gruppen. Diese Daten dienen der Sammlung, nicht der Bewertung eines Gewinners. Prüfmaps wurden weder für die Kurvenanpassung noch für diese Suchstatistik verwendet.</p>
+<div class="scroll"><table><thead><tr id="stats-head"></tr></thead><tbody id="stats-values"></tbody></table></div>
+</section>
+<script>
+let info, candidate, selectedMap;
+const $ = id => document.getElementById(id);
+const number = value => Number(value).toLocaleString('de-DE', {maximumFractionDigits:3});
+function row(parent, values, heading=false) {
+  const tr=document.createElement('tr');
+  for(const value of values){const cell=document.createElement(heading?'th':'td');cell.textContent=value;tr.append(cell);}
+  parent.append(tr);
+}
+async function api(path){const response=await fetch(path);if(!response.ok)throw new Error('Daten nicht verfügbar. Kombination gespeichert?');return response.json();}
+function mapValue(x, anchors){
+  if(!(x>0))return 0;
+  let i=1;while(i<anchors.length-1&&x>anchors[i][0])i++;
+  const [x0,y0]=anchors[i-1],[x1,y1]=anchors[i];return y0+(x-x0)*(y1-y0)/(x1-x0);
+}
+function renderMap(){
+  if(!candidate||!selectedMap)return;
+  $('map-title').textContent=`${selectedMap.artist} – ${selectedMap.title} [${selectedMap.version}]`;
+  $('map-info').textContent=`${number(selectedMap.pattern.stars)}★ · ${selectedMap.holdout?'Prüfpool (nicht zum Anpassen verwendet)':'Trainingspool'} · NoMod 1,00×. Keine tatsächlich erzielte Accuracy/Misses eingerechnet.`;
+  $('map-values').replaceChildren();
+  info.references.forEach((ref,k)=>{
+    const p=selectedMap.pattern,raw=p.raw[k];
+    const median=ref.points.find(point=>point.targetIndex===0).raw;
+    const eligible=raw>0&&p.support[k]>=(k===4?6:12)&&p.coverage[k]>=(k===4?.03:.1);
+    row($('map-values'),[ref.label,number(raw),number(raw*5),number(raw*candidate.targets[0]/median),number(mapValue(raw,candidate.curves[k])),eligible?'Ja':'Nein']);
+  });
+}
+async function loadCandidate(query){
+  try{
+    $('error').textContent='';candidate=await api('/api/candidate?'+query);
+    $('candidate-id').value=candidate.id;
+    ['p50','p75','p90'].forEach((id,i)=>$(id).value=candidate.targets[i]);
+    $('stats-head').replaceChildren();
+    for(const label of ['Skill',...info.config.quantilesToRecord.map(q=>'P'+Math.round(q*100)),'Segment-Steigungen']){
+      const th=document.createElement('th');th.textContent=label;$('stats-head').append(th);
+    }
+    $('stats-values').replaceChildren();
+    candidate.stats.forEach((s,k)=>row($('stats-values'),[info.references[k].label,...s.trainingRatings.map(number),s.slopes.map(number).join(' / ')]));
+    renderMap();
+  }catch(error){$('error').textContent=error.message;}
+}
+$('load-id').onclick=()=>loadCandidate('id='+encodeURIComponent($('candidate-id').value));
+$('previous').onclick=()=>loadCandidate('id='+Math.max(1,Number($('candidate-id').value)-1));
+$('next').onclick=()=>loadCandidate('id='+(Number($('candidate-id').value)+1));
+$('load-targets').onclick=()=>loadCandidate('targets='+encodeURIComponent(JSON.stringify(['p50','p75','p90'].map(id=>Number($(id).value)))));
+$('search').onsubmit=async event=>{
+  event.preventDefault();
+  try{
+    const matches=await api('/api/maps?q='+encodeURIComponent($('query').value));$('maps').replaceChildren();
+    for(const map of matches){const option=document.createElement('option');option.value=map.hash;option.textContent=map.label;$('maps').append(option);}
+    if(!matches.length)$('map-info').textContent='Keine Treffer (mindestens 2 Zeichen eingeben).';
+    else{$('maps').selectedIndex=0;selectedMap=await api('/api/map?hash='+matches[0].hash);renderMap();}
+  }catch(error){$('error').textContent=error.message;}
+};
+$('maps').onchange=async()=>{try{selectedMap=await api('/api/map?hash='+encodeURIComponent($('maps').value));renderMap();}catch(error){$('error').textContent=error.message;}};
+$('download').onclick=()=>{
+  if(!candidate)return;
+  const blob=new Blob([JSON.stringify({previewOnly:true,fingerprint:info.fingerprint,model:info.model,references:info.references,...candidate},null,2)],{type:'application/json'});
+  const url=URL.createObjectURL(blob),link=document.createElement('a');link.href=url;link.download=`skill-curve-candidate-${candidate.id}.json`;link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
+};
+(async()=>{try{info=await api('/api/info');$('status').textContent=`${info.model} · ${number(info.saved)} von ${number(info.total)} Kombinationen gespeichert.`;await loadCandidate('id=1');}catch(error){$('error').textContent=error.message;}})();
+</script>
+</html>

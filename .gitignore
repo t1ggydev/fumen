@@ -15,6 +15,8 @@ src-tauri/binaries/
 
 # local preview data (contains the developer's library)
 tools/browser-preview/.cache/
+tools/skill-calibration/.cache/
+tools/skill-calibration/__pycache__/
 
 # editors / OS
 .vscode/*
